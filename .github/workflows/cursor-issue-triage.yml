@@ -83,9 +83,25 @@ jobs:
               core.info('Triage comment was empty.');
               return;
             }
-            await github.rest.issues.createComment({
+            const payload = {
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: issue.number,
               body,
-            });
+            };
+            let lastError;
+            for (let attempt = 1; attempt <= 4; attempt++) {
+              try {
+                await github.rest.issues.createComment(payload);
+                return;
+              } catch (error) {
+                lastError = error;
+                const status = error.status || 0;
+                if ([400, 401, 403, 404, 422].includes(status) || attempt === 4) {
+                  throw error;
+                }
+                core.warning(`Comment attempt ${attempt} failed with HTTP ${status}. Retrying.`);
+                await new Promise((resolve) => setTimeout(resolve, attempt * 2000));
+              }
+            }
+            throw lastError;
