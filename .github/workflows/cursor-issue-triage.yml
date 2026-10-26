@@ -1,0 +1,91 @@
+name: Cursor issue triage
+
+on:
+  issues:
+    types: [opened]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Existing issue number to triage
+        required: true
+        type: string
+
+# contents: read is required to check out the prompt file. The token comments
+# on this repo only. The cloud agent pushes to Hazmit/fcc_register.
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: cursor-issue-triage-${{ github.event.issue.number || inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    if: github.event_name == 'workflow_dispatch' || github.event.issue.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout prompt
+        uses: actions/checkout@v4
+
+      - name: Load issue
+        id: issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const number = context.eventName === 'workflow_dispatch'
+              ? Number(context.payload.inputs.issue_number)
+              : context.payload.issue.number;
+            if (!Number.isInteger(number) || number < 1) {
+              core.setFailed('Issue number is missing or not an integer.');
+              return;
+            }
+            const { data } = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: number,
+            });
+            if (data.pull_request) {
+              core.setFailed('Refusing to triage a pull request.');
+              return;
+            }
+            fs.writeFileSync('issue.json', JSON.stringify({
+              number: data.number,
+              title: data.title,
+              body: data.body || '',
+              url: data.html_url,
+              userType: data.user && data.user.type ? data.user.type : 'User',
+            }));
+            core.setOutput('number', String(data.number));
+
+      - name: Launch cloud agent
+        id: agent
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          CURSOR_TRIAGE_MODE: ${{ vars.CURSOR_TRIAGE_MODE }}
+        run: bash .github/scripts/cursor-issue-triage.sh
+
+      - name: Comment on issue
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('triage-comment.md') || !fs.existsSync('issue.json')) {
+              core.info('No triage comment to post.');
+              return;
+            }
+            const issue = JSON.parse(fs.readFileSync('issue.json', 'utf8'));
+            const body = fs.readFileSync('triage-comment.md', 'utf8').trim();
+            if (!body) {
+              core.info('Triage comment was empty.');
+              return;
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body,
+            });
